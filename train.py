@@ -3,6 +3,10 @@
 """
 Qwen3.5-0.8B Vision OCR Fine-tuning
 Portable training script — reads all config from environment variables.
+
+Dataset:  local sharded Parquet (prepared by prepare_hf_dataset.py)
+          columns: image (PIL), text, class_name, source
+
 Usage:
     python train.py                   # train
     python train.py --mode eval       # run eval loop only
@@ -13,9 +17,8 @@ Usage:
 import argparse
 import os
 import sys
-import tarfile
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Union
 
 
 # ─────────────────────────── helpers ─────────────────────────────────────────
@@ -42,8 +45,7 @@ def env_float(key: str, default: float) -> float:
 # ─────────────────────────── config ──────────────────────────────────────────
 
 HF_TOKEN          = env("HF_TOKEN")
-HF_DATASET        = env("HF_DATASET", "kavinh07/synth-200k-ocr")
-DATA_DIR          = Path(env("DATA_DIR", "/workspace/data"))
+LOCAL_DATASET_DIR = Path(env("LOCAL_DATASET_DIR", "/workspace/hf_dataset"))
 OUTPUT_DIR        = Path(env("OUTPUT_DIR", "/workspace/outputs"))
 MODEL_SAVE_DIR    = Path(env("MODEL_SAVE_DIR", "/workspace/outputs/qwen_lora"))
 
@@ -54,13 +56,13 @@ LORA_R            = env_int("LORA_R", 16)
 LORA_ALPHA        = env_int("LORA_ALPHA", 16)
 LORA_DROPOUT      = env_float("LORA_DROPOUT", 0.0)
 
-TRAIN_SAMPLES     = env_int("TRAIN_SAMPLES", 80000)
-VAL_SAMPLES       = env_int("VAL_SAMPLES", 5000)
+TRAIN_SAMPLES     = env_int("TRAIN_SAMPLES", -1)      # -1 → use all
+VAL_SAMPLES       = env_int("VAL_SAMPLES", -1)         # -1 → use all
 BATCH_SIZE        = env_int("PER_DEVICE_BATCH_SIZE", 16)
 EVAL_BATCH_SIZE   = env_int("PER_DEVICE_EVAL_BATCH_SIZE", BATCH_SIZE)
 GRAD_ACCUM        = env_int("GRADIENT_ACCUMULATION_STEPS", 4)
 WARMUP_STEPS      = env_int("WARMUP_STEPS", 5)
-MAX_STEPS         = env_int("MAX_STEPS", 500)      # -1 → use epochs
+MAX_STEPS         = env_int("MAX_STEPS", 500)          # -1 → use epochs
 NUM_EPOCHS        = env_int("NUM_TRAIN_EPOCHS", 1)
 LR                = env_float("LEARNING_RATE", 2e-4)
 WEIGHT_DECAY      = env_float("WEIGHT_DECAY", 0.001)
@@ -82,52 +84,75 @@ os.environ["HF_TOKEN"] = HF_TOKEN
 
 # ─────────────────────────── data helpers ────────────────────────────────────
 
-def download_dataset():
-    """Download and extract the HuggingFace dataset."""
-    from huggingface_hub import snapshot_download
+def load_local_dataset():
+    """
+    Load the sharded Parquet dataset produced by prepare_hf_dataset.py.
 
-    raw_dir = DATA_DIR.parent / "raw_dataset"
-    print(f"[data] Downloading {HF_DATASET} → {raw_dir}")
-    snapshot_download(HF_DATASET, repo_type="dataset", local_dir=str(raw_dir),
-                      token=HF_TOKEN)
+    Expected layout:
+        LOCAL_DATASET_DIR/
+            train/shard-0000-of-XXXX.parquet ...
+            validation/shard-0000-of-XXXX.parquet ...
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tar_files = list(raw_dir.glob("*.tar"))
-    if not tar_files:
-        print("[data] No .tar files found — assuming dataset is already extracted.")
-        return
+    Returns (train_dataset, val_dataset) — HuggingFace Dataset objects.
+    Each row: { image: PIL.Image, text: str, class_name: str, source: str }
+    """
+    from datasets import load_dataset
 
-    print(f"[data] Extracting {len(tar_files)} archive(s) → {DATA_DIR}")
-    for tar_path in tar_files:
-        with tarfile.open(tar_path) as tf:
-            tf.extractall(path=str(DATA_DIR))
-    print("[data] Extraction complete.")
+    train_glob = str(LOCAL_DATASET_DIR / "train" / "*.parquet")
+    val_glob   = str(LOCAL_DATASET_DIR / "validation" / "*.parquet")
+
+    if not list(LOCAL_DATASET_DIR.glob("train/*.parquet")):
+        raise FileNotFoundError(
+            f"No train shards found under {LOCAL_DATASET_DIR}/train/. "
+            "Run prepare_hf_dataset.py first."
+        )
+
+    print(f"[data] Loading dataset from {LOCAL_DATASET_DIR}")
+    ds = load_dataset(
+        "parquet",
+        data_files={"train": train_glob, "validation": val_glob},
+        num_proc=DATASET_NUM_PROC,
+    )
+
+    train_ds = ds["train"]
+    val_ds   = ds["validation"]
+
+    if TRAIN_SAMPLES > 0:
+        train_ds = train_ds.select(range(min(TRAIN_SAMPLES, len(train_ds))))
+    if VAL_SAMPLES > 0:
+        val_ds   = val_ds.select(range(min(VAL_SAMPLES, len(val_ds))))
+
+    print(f"[data] Train: {len(train_ds):,}   Val: {len(val_ds):,}")
+    print(f"[data] Sources — train: {dict(zip(*_count_sources(train_ds)))}")
+    print(f"[data] Sources — val  : {dict(zip(*_count_sources(val_ds)))}")
+    return train_ds, val_ds
 
 
-def load_records() -> List[Dict]:
-    """Read every .txt file and pair it with its .jpg counterpart."""
-    records = []
-    for txt_path in DATA_DIR.glob("*.txt"):
-        img_path = DATA_DIR / (txt_path.stem + ".jpg")
-        if not img_path.exists():
-            continue
-        text = txt_path.read_text(encoding="utf-8").strip()
-        records.append({"image_path": str(img_path), "text": text})
-    print(f"[data] Loaded {len(records)} image-text pairs.")
-    return records
+def _count_sources(dataset):
+    from collections import Counter
+    c = Counter(dataset["source"])
+    return list(c.keys()), list(c.values())
 
 
-def to_chat_format(records: List[Dict], prompt: str = OCR_PROMPT) -> List[Dict]:
-    """Convert raw records to the Qwen3.5 multi-modal chat format."""
+def to_chat_format(dataset, prompt: str = OCR_PROMPT) -> List[Dict]:
+    """
+    Convert HF dataset rows to Unsloth vision chat format.
+
+    dataset rows have:
+        image      PIL.Image  (decoded by HF Image() feature)
+        text       str
+        class_name str
+        source     str
+    """
     chat = []
-    for item in records:
+    for item in dataset:
         chat.append({
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image", "image": item["image_path"]},
+                        {"type": "text",  "text": prompt},
+                        {"type": "image", "image": item["image"]},
                     ],
                 },
                 {
@@ -135,7 +160,11 @@ def to_chat_format(records: List[Dict], prompt: str = OCR_PROMPT) -> List[Dict]:
                     "content": [{"type": "text", "text": item["text"]}],
                 },
             ],
-            "image_path": item["image_path"],
+            # kept for eval / sanity-check
+            "image":      item["image"],
+            "text":       item["text"],
+            "class_name": item["class_name"],
+            "source":     item["source"],
         })
     return chat
 
@@ -171,8 +200,12 @@ def load_model_and_tokenizer(for_inference: bool = False):
     return model, tokenizer
 
 
-def run_inference(model, tokenizer, image_path: str, instruction: str = OCR_PROMPT):
-    """Run inference on a single image and return the decoded text."""
+def run_inference(model, tokenizer, image: Union[str, "PIL.Image.Image"],
+                  instruction: str = OCR_PROMPT) -> str:
+    """
+    Run inference on a single image (PIL.Image or path string).
+    Returns decoded prediction string.
+    """
     from unsloth import FastVisionModel
     from transformers import TextStreamer
 
@@ -186,7 +219,7 @@ def run_inference(model, tokenizer, image_path: str, instruction: str = OCR_PROM
     ]
     input_text = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
     inputs = tokenizer(
-        image_path,
+        image,
         input_text,
         add_special_tokens=False,
         return_tensors="pt",
@@ -213,14 +246,11 @@ def mode_train():
     from trl import SFTTrainer, SFTConfig
 
     # ── data ──
-    download_dataset()
-    records = load_records()
-    train_records = records[:TRAIN_SAMPLES]
-    val_records = records[TRAIN_SAMPLES: TRAIN_SAMPLES + VAL_SAMPLES]
-    training_data = to_chat_format(train_records)
-    val_data = to_chat_format(val_records)
-    print(f"[train] Training samples: {len(training_data)}")
-    print(f"[train] Validation samples: {len(val_data)}")
+    train_ds, val_ds = load_local_dataset()
+    training_data = to_chat_format(train_ds)
+    val_data      = to_chat_format(val_ds)
+    print(f"[train] Training samples : {len(training_data):,}")
+    print(f"[train] Validation samples: {len(val_data):,}")
 
     # ── model ──
     model, tokenizer = load_model_and_tokenizer(for_inference=False)
@@ -276,8 +306,9 @@ def mode_train():
 
     # ── quick sanity-check inference ──
     print("[train] Running sanity-check inference …")
-    result = run_inference(model, tokenizer, training_data[0]["image_path"])
-    print(f"[infer] {result}")
+    result = run_inference(model, tokenizer, training_data[0]["image"])
+    print(f"[infer] GT : {training_data[0]['text']}")
+    print(f"[infer] PRD: {result}")
 
     mode_export(model, tokenizer)
 
@@ -285,22 +316,20 @@ def mode_train():
 def mode_eval():
     from unsloth import FastVisionModel
 
-    download_dataset()
-    records = load_records()
-    eval_records = records[TRAIN_SAMPLES: TRAIN_SAMPLES + VAL_SAMPLES]
-    if not eval_records:
-        eval_records = records[TRAIN_SAMPLES:]
-    eval_data = to_chat_format(eval_records)
+    _, val_ds = load_local_dataset()
+    eval_data = to_chat_format(val_ds)
 
     model, tokenizer = load_model_and_tokenizer(for_inference=True)
     FastVisionModel.for_inference(model)
 
-    print(f"[eval] Evaluating on {min(200, len(eval_data))} samples …")
-    for item in eval_data[:200]:
-        ground_truth = item["messages"][1]["content"][0]["text"]
-        prediction = run_inference(model, tokenizer, item["image_path"])
+    n = min(200, len(eval_data))
+    print(f"[eval] Evaluating on {n} samples …")
+    for item in eval_data[:n]:
+        ground_truth = item["text"]
+        prediction   = run_inference(model, tokenizer, item["image"])
         print(f"GT : {ground_truth}")
         print(f"PRD: {prediction}")
+        print(f"SRC: {item['source']}  CLASS: {item['class_name']}")
         print("─" * 60)
 
 
@@ -364,11 +393,11 @@ def main():
     )
     args = parser.parse_args()
 
-    print(f"[main] Mode: {args.mode}")
-    print(f"[main] Base model : {BASE_MODEL}")
-    print(f"[main] 4-bit LoRA : {LOAD_IN_4BIT}")
-    print(f"[main] Data dir   : {DATA_DIR}")
-    print(f"[main] Output dir : {OUTPUT_DIR}")
+    print(f"[main] Mode            : {args.mode}")
+    print(f"[main] Base model      : {BASE_MODEL}")
+    print(f"[main] 4-bit LoRA      : {LOAD_IN_4BIT}")
+    print(f"[main] Local dataset   : {LOCAL_DATASET_DIR}")
+    print(f"[main] Output dir      : {OUTPUT_DIR}")
 
     if args.mode == "train":
         mode_train()
