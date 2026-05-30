@@ -2,7 +2,7 @@ FROM unsloth/unsloth:latest
 
 WORKDIR /workspace
 
-RUN pip install datasets
+RUN pip install datasets jiwer
 
 COPY train.py /workspace/train.py
 

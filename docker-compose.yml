@@ -1,0 +1,44 @@
+services:
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qwen3-ocr-trainer
+    container_name: qwen3_ocr_train
+
+    # ── env ──────────────────────────────────────────────────────────────────
+    env_file: .env
+
+    # ── GPU ──────────────────────────────────────────────────────────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # ── shared memory (large batches need it) ────────────────────────────────
+    shm_size: "16gb"
+
+    # ── persistent volumes ───────────────────────────────────────────────────
+    volumes:
+      - ./outputs:/workspace/outputs   # checkpoints, merged model, GGUF
+      - ./data:/workspace/data         # dataset cache (optional local mirror)
+      - huggingface_cache:/root/.cache/huggingface  # HF model/dataset cache
+
+    # ── don't restart on exit — training is one-shot ─────────────────────────
+    restart: "no"
+
+    # ── default: train; override with --mode eval|infer|export ───────────────
+    command: ["--mode", "train"]
+
+    # ── logging ──────────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+volumes:
+  huggingface_cache:

@@ -13,9 +13,10 @@ Usage:
 import argparse
 import os
 import sys
-import tarfile
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
+
+import numpy as np
 
 
 # ─────────────────────────── helpers ─────────────────────────────────────────
@@ -60,12 +61,12 @@ BATCH_SIZE        = env_int("PER_DEVICE_BATCH_SIZE", 16)
 EVAL_BATCH_SIZE   = env_int("PER_DEVICE_EVAL_BATCH_SIZE", BATCH_SIZE)
 GRAD_ACCUM        = env_int("GRADIENT_ACCUMULATION_STEPS", 4)
 WARMUP_STEPS      = env_int("WARMUP_STEPS", 5)
-MAX_STEPS         = env_int("MAX_STEPS", 500)      # -1 → use epochs
-NUM_EPOCHS        = env_int("NUM_TRAIN_EPOCHS", 1)
+MAX_STEPS                = env_int("MAX_STEPS", -1)         # -1 → use epochs
+NUM_EPOCHS               = env_int("NUM_TRAIN_EPOCHS", 3)
+EARLY_STOPPING_PATIENCE  = env_int("EARLY_STOPPING_PATIENCE", 3)
 LR                = env_float("LEARNING_RATE", 2e-4)
 WEIGHT_DECAY      = env_float("WEIGHT_DECAY", 0.001)
 LR_SCHEDULER      = env("LR_SCHEDULER", "linear")
-MAX_LENGTH        = env_int("MAX_LENGTH", 1024)
 SEED              = env_int("SEED", 3407)
 LOGGING_STEPS     = env_int("LOGGING_STEPS", 10)
 EVAL_STEPS        = env_int("EVAL_STEPS", 100)
@@ -75,69 +76,91 @@ SAVE_MERGED       = env_bool("SAVE_MERGED_16BIT", "true")
 SAVE_GGUF_Q8      = env_bool("SAVE_GGUF_Q8", "true")
 SAVE_GGUF_Q4      = env_bool("SAVE_GGUF_Q4_K_M", "true")
 
-OCR_PROMPT        = env("OCR_PROMPT", "Extract all text from this image. Output only the text.")
+PUSH_TO_HUB       = env_bool("PUSH_TO_HUB", "false")
+HF_REPO_ID        = env("HF_REPO_ID", "kavinh07/unsloth_finetune_qwen3.5-0.8B")
+
+OCR_PROMPT        = env("OCR_PROMPT", "All text in this image is in {LANG}. Transcribe every character exactly as it appears. Output only the text.")
 
 os.environ["HF_TOKEN"] = HF_TOKEN
 
 
-# ─────────────────────────── data helpers ────────────────────────────────────
+# ─────────────────────────── dataset ─────────────────────────────────────────
 
-def download_dataset():
-    """Download and extract the HuggingFace dataset."""
-    from huggingface_hub import snapshot_download
+class OCRDatasetPreparator:
+    """
+    Loads a parquet HF dataset (image / text / class_name / source columns),
+    detects the language of each ground-truth label, injects it into the prompt
+    template via the {LANG} placeholder, and returns chat-format records ready
+    for UnslothVisionDataCollator.
 
-    raw_dir = DATA_DIR.parent / "raw_dataset"
-    print(f"[data] Downloading {HF_DATASET} → {raw_dir}")
-    snapshot_download(HF_DATASET, repo_type="dataset", local_dir=str(raw_dir),
-                      token=HF_TOKEN)
+    Language detection rules (Unicode):
+      Bangla only          → "Bangla"          (U+0980–U+09FF)
+      ASCII alpha only     → "English"
+      Both present         → "Both Bangla and English"
+    """
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tar_files = list(raw_dir.glob("*.tar"))
-    if not tar_files:
-        print("[data] No .tar files found — assuming dataset is already extracted.")
-        return
+    _BANGLA_LO = "ঀ"
+    _BANGLA_HI = "৿"
 
-    print(f"[data] Extracting {len(tar_files)} archive(s) → {DATA_DIR}")
-    for tar_path in tar_files:
-        with tarfile.open(tar_path) as tf:
-            tf.extractall(path=str(DATA_DIR))
-    print("[data] Extraction complete.")
+    def __init__(
+        self,
+        dataset_id: str,
+        token: str,
+        prompt_template: str,
+        train_samples: int = 0,
+        val_samples: int = 0,
+    ) -> None:
+        self.dataset_id = dataset_id
+        self.token = token
+        self.prompt_template = prompt_template
+        self.train_samples = train_samples
+        self.val_samples = val_samples
 
+    def detect_lang(self, text: str) -> str:
+        has_bangla  = any(self._BANGLA_LO <= ch <= self._BANGLA_HI for ch in text)
+        has_english = any(ch.isascii() and ch.isalpha() for ch in text)
+        if has_bangla and has_english:
+            return "Both Bangla and English"
+        if has_bangla:
+            return "Bangla"
+        return "English"
 
-def load_records() -> List[Dict]:
-    """Read every .txt file and pair it with its .jpg counterpart."""
-    records = []
-    for txt_path in DATA_DIR.glob("*.txt"):
-        img_path = DATA_DIR / (txt_path.stem + ".jpg")
-        if not img_path.exists():
-            continue
-        text = txt_path.read_text(encoding="utf-8").strip()
-        records.append({"image_path": str(img_path), "text": text})
-    print(f"[data] Loaded {len(records)} image-text pairs.")
-    return records
+    def format_prompt(self, text: str) -> str:
+        return self.prompt_template.replace("{LANG}", self.detect_lang(text))
 
-
-def to_chat_format(records: List[Dict], prompt: str = OCR_PROMPT) -> List[Dict]:
-    """Convert raw records to the Qwen3.5 multi-modal chat format."""
-    chat = []
-    for item in records:
-        chat.append({
+    def _to_chat(self, record: Dict) -> Dict:
+        return {
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image", "image": item["image_path"]},
+                        {"type": "text",  "text":  self.format_prompt(record["text"])},
+                        {"type": "image", "image": record["image"]},
                     ],
                 },
                 {
                     "role": "assistant",
-                    "content": [{"type": "text", "text": item["text"]}],
+                    "content": [{"type": "text", "text": record["text"]}],
                 },
             ],
-            "image_path": item["image_path"],
-        })
-    return chat
+        }
+
+    def _select(self, split, n: int):
+        return split.select(range(min(n, len(split)))) if n > 0 else split
+
+    def load(self) -> Tuple[List[Dict], List[Dict]]:
+        from datasets import load_dataset as hf_load
+
+        print(f"[data] Loading {self.dataset_id} …")
+        ds = hf_load(self.dataset_id, token=self.token)
+
+        train_split = self._select(ds["train"],      self.train_samples)
+        val_split   = self._select(ds["validation"], self.val_samples)
+
+        print(f"[data] Converting {len(train_split)} train + {len(val_split)} val records …")
+        train_data = [self._to_chat(r) for r in train_split]
+        val_data   = [self._to_chat(r) for r in val_split]
+        return train_data, val_data
 
 
 # ─────────────────────────── model helpers ───────────────────────────────────
@@ -171,10 +194,13 @@ def load_model_and_tokenizer(for_inference: bool = False):
     return model, tokenizer
 
 
-def run_inference(model, tokenizer, image_path: str, instruction: str = OCR_PROMPT):
-    """Run inference on a single image and return the decoded text."""
+def run_inference(model, tokenizer, image, instruction: str = None):
+    """Run inference on a single image (PIL Image or path string)."""
     from unsloth import FastVisionModel
     from transformers import TextStreamer
+
+    if instruction is None:
+        instruction = OCR_PROMPT.replace("{LANG}", "Both Bangla and English")
 
     FastVisionModel.for_inference(model)
 
@@ -186,7 +212,7 @@ def run_inference(model, tokenizer, image_path: str, instruction: str = OCR_PROM
     ]
     input_text = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
     inputs = tokenizer(
-        image_path,
+        image,
         input_text,
         add_special_tokens=False,
         return_tensors="pt",
@@ -207,19 +233,39 @@ def run_inference(model, tokenizer, image_path: str, instruction: str = OCR_PROM
 
 # ─────────────────────────── modes ───────────────────────────────────────────
 
+def make_compute_metrics(tokenizer):
+    def compute_metrics(eval_pred):
+        import jiwer
+        pred_ids, labels = eval_pred
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        pred_strs = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+        label_strs = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        cer = jiwer.cer(label_strs, pred_strs)
+        return {"cer": cer}
+    return compute_metrics
+
+
+def preprocess_logits_for_metrics(logits, labels):
+    if isinstance(logits, tuple):
+        logits = logits[0]
+    return logits.argmax(dim=-1)
+
+
 def mode_train():
     from unsloth import FastVisionModel
     from unsloth.trainer import UnslothVisionDataCollator
     from trl import SFTTrainer, SFTConfig
+    from transformers import EarlyStoppingCallback
 
     # ── data ──
-    download_dataset()
-    records = load_records()
-    train_records = records[:TRAIN_SAMPLES]
-    val_records = records[TRAIN_SAMPLES: TRAIN_SAMPLES + VAL_SAMPLES]
-    training_data = to_chat_format(train_records)
-    val_data = to_chat_format(val_records)
-    print(f"[train] Training samples: {len(training_data)}")
+    training_data, val_data = OCRDatasetPreparator(
+        dataset_id=HF_DATASET,
+        token=HF_TOKEN,
+        prompt_template=OCR_PROMPT,
+        train_samples=TRAIN_SAMPLES,
+        val_samples=VAL_SAMPLES,
+    ).load()
+    print(f"[train] Training samples  : {len(training_data)}")
     print(f"[train] Validation samples: {len(val_data)}")
 
     # ── model ──
@@ -236,8 +282,13 @@ def mode_train():
         warmup_steps=WARMUP_STEPS,
         learning_rate=LR,
         logging_steps=LOGGING_STEPS,
-        evaluation_strategy="steps" if len(val_data) > 0 else "no",
+        eval_strategy="steps" if len(val_data) > 0 else "no",
         eval_steps=EVAL_STEPS,
+        save_strategy="steps" if len(val_data) > 0 else "no",
+        save_steps=EVAL_STEPS,
+        load_best_model_at_end=len(val_data) > 0,
+        metric_for_best_model="cer",
+        greater_is_better=False,
         optim="adamw_8bit",
         weight_decay=WEIGHT_DECAY,
         lr_scheduler_type=LR_SCHEDULER,
@@ -247,7 +298,7 @@ def mode_train():
         remove_unused_columns=False,
         dataset_text_field="",
         dataset_kwargs={"skip_prepare_dataset": True},
-        max_length=MAX_LENGTH,
+        max_length=None,
         dataset_num_proc=DATASET_NUM_PROC,
     )
     if MAX_STEPS > 0:
@@ -255,12 +306,16 @@ def mode_train():
     else:
         sft_args["num_train_epochs"] = NUM_EPOCHS
 
+    has_val = len(val_data) > 0
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         data_collator=UnslothVisionDataCollator(model, tokenizer),
         train_dataset=training_data,
-        eval_dataset=val_data if len(val_data) > 0 else None,
+        eval_dataset=val_data if has_val else None,
+        compute_metrics=make_compute_metrics(tokenizer) if has_val else None,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics if has_val else None,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE)] if has_val else [],
         args=SFTConfig(**sft_args),
     )
 
@@ -274,9 +329,16 @@ def mode_train():
     tokenizer.save_pretrained(str(MODEL_SAVE_DIR))
     print(f"[train] LoRA saved → {MODEL_SAVE_DIR}")
 
+    # ── push best model to Hub ──
+    if PUSH_TO_HUB:
+        print(f"[train] Pushing LoRA adapter to Hub → {HF_REPO_ID}")
+        model.push_to_hub_merged(HF_REPO_ID, tokenizer, save_method="lora", token=HF_TOKEN)
+        print(f"[train] Hub push complete → https://huggingface.co/{HF_REPO_ID}")
+
     # ── quick sanity-check inference ──
     print("[train] Running sanity-check inference …")
-    result = run_inference(model, tokenizer, training_data[0]["image_path"])
+    sample = training_data[0]["messages"][0]["content"]
+    result = run_inference(model, tokenizer, sample[1]["image"], instruction=sample[0]["text"])
     print(f"[infer] {result}")
 
     mode_export(model, tokenizer)
@@ -285,20 +347,21 @@ def mode_train():
 def mode_eval():
     from unsloth import FastVisionModel
 
-    download_dataset()
-    records = load_records()
-    eval_records = records[TRAIN_SAMPLES: TRAIN_SAMPLES + VAL_SAMPLES]
-    if not eval_records:
-        eval_records = records[TRAIN_SAMPLES:]
-    eval_data = to_chat_format(eval_records)
+    _, eval_data = OCRDatasetPreparator(
+        dataset_id=HF_DATASET,
+        token=HF_TOKEN,
+        prompt_template=OCR_PROMPT,
+        val_samples=VAL_SAMPLES,
+    ).load()
 
     model, tokenizer = load_model_and_tokenizer(for_inference=True)
     FastVisionModel.for_inference(model)
 
     print(f"[eval] Evaluating on {min(200, len(eval_data))} samples …")
     for item in eval_data[:200]:
+        content      = item["messages"][0]["content"]
         ground_truth = item["messages"][1]["content"][0]["text"]
-        prediction = run_inference(model, tokenizer, item["image_path"])
+        prediction   = run_inference(model, tokenizer, content[1]["image"], instruction=content[0]["text"])
         print(f"GT : {ground_truth}")
         print(f"PRD: {prediction}")
         print("─" * 60)
@@ -342,12 +405,18 @@ def mode_export(model=None, tokenizer=None):
     if SAVE_GGUF_Q8:
         gguf_q8_path = str(OUTPUT_DIR / "gguf_q8")
         print(f"[export] Saving GGUF Q8_0 → {gguf_q8_path}")
-        model.save_pretrained_gguf(gguf_q8_path, tokenizer)
+        try:
+            model.save_pretrained_gguf(gguf_q8_path, tokenizer)
+        except Exception as e:
+            print(f"[export] GGUF Q8_0 skipped — vision models may not support GGUF: {e}")
 
     if SAVE_GGUF_Q4:
         gguf_q4_path = str(OUTPUT_DIR / "gguf_q4_k_m")
         print(f"[export] Saving GGUF q4_k_m → {gguf_q4_path}")
-        model.save_pretrained_gguf(gguf_q4_path, tokenizer, quantization_method="q4_k_m")
+        try:
+            model.save_pretrained_gguf(gguf_q4_path, tokenizer, quantization_method="q4_k_m")
+        except Exception as e:
+            print(f"[export] GGUF q4_k_m skipped — vision models may not support GGUF: {e}")
 
     print("[export] Export complete.")
 
