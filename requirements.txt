@@ -8,28 +8,28 @@
 #   docker run --rm --entrypoint pip unsloth/unsloth:latest freeze > requirements.lock.txt
 
 # ── core ──────────────────────────────────────────────────────────────────────
-torch==2.6.0
-unsloth==2026.1.4
-unsloth_zoo==2026.1.3
+torch
+unsloth
+unsloth_zoo
 
 # ── trainer stack ──────────────────────────────────────────────────────────────
-transformers==4.49.0
-trl==0.15.2                 # SFTConfig uses max_length (script sets max_length=None)
-peft==0.14.0
-accelerate==1.3.0
-datasets==3.2.0
-huggingface_hub==0.27.1
-tokenizers==0.21.0
+transformers
+trl
+peft
+accelerate
+datasets
+huggingface_hub
+tokenizers
 
 # ── quantization (only needed when LOAD_IN_4BIT=true) ───────────────────────────
-bitsandbytes==0.45.0
+bitsandbytes
 
 # ── vision + tokenizer ─────────────────────────────────────────────────────────
-pillow==11.1.0
-sentencepiece==0.2.0
+pillow
+sentencepiece
 
 # ── metric (jiwer.cer in compute_metrics) ───────────────────────────────────────
-jiwer==3.1.0
+jiwer
 
 # ── numerics (unsloth builds expect numpy<2) ────────────────────────────────────
-numpy==1.26.4
+numpy
