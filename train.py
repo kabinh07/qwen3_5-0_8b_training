@@ -15,8 +15,10 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
-
+from dotenv import load_dotenv
 import numpy as np
+
+load_dotenv()
 
 
 # ─────────────────────────── helpers ─────────────────────────────────────────
@@ -238,6 +240,7 @@ def make_compute_metrics(tokenizer):
         import jiwer
         pred_ids, labels = eval_pred
         labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        pred_ids = np.where(pred_ids != -100, pred_ids, tokenizer.pad_token_id)
         pred_strs = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
         label_strs = tokenizer.batch_decode(labels, skip_special_tokens=True)
         cer = jiwer.cer(label_strs, pred_strs)
@@ -286,6 +289,7 @@ def mode_train():
         eval_steps=EVAL_STEPS,
         save_strategy="steps" if len(val_data) > 0 else "no",
         save_steps=EVAL_STEPS,
+        save_total_limit=2,
         load_best_model_at_end=len(val_data) > 0,
         metric_for_best_model="cer",
         greater_is_better=False,

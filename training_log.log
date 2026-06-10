@@ -1,0 +1,32 @@
+nohup: ignoring input
+[main] Mode: train
+[main] Base model : unsloth/Qwen3.5-0.8B
+[main] 4-bit LoRA : False
+[main] Data dir   : /workspace/data
+[main] Output dir : /workspace/outputs
+🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
+Unsloth: Your Flash Attention 2 installation seems to be broken. Using Xformers instead. No performance changes will be seen.
+🦥 Unsloth Zoo will now patch everything to make training faster!
+[data] Loading kavinh07/ocr_dataset_shamadhan_synth_200k …
+[data] Converting 80000 train + 5000 val records …
+[train] Training samples  : 80000
+[train] Validation samples: 5000
+==((====))==  Unsloth 2026.6.1: Fast Qwen3_5 patching. Transformers: 5.5.0.
+   \\   /|    NVIDIA RTX 4000 Ada Generation. Num GPUs = 1. Max memory: 19.674 GB. Platform: Linux.
+O^O/ \_/ \    Torch: 2.10.0+cu128. CUDA: 8.9. CUDA Toolkit: 12.8. Triton: 3.6.0
+\        /    Bfloat16 = TRUE. FA [Xformers = 0.0.35. FA2 = False]
+ "-____-"     Free license: http://github.com/unslothai/unsloth
+Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
+The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Unsloth: QLoRA and full finetuning all not selected. Switching to 16bit LoRA.
+Loading weights:   0%|          | 0/473 [00:00<?, ?it/s]Loading weights:  31%|███       | 147/473 [00:00<00:00, 1466.55it/s]Loading weights:  64%|██████▍   | 305/473 [00:00<00:00, 1532.85it/s]Loading weights: 100%|██████████| 473/473 [00:00<00:00, 1757.39it/s]
+[unsloth_zoo.log|WARNING]Unsloth: Failed to register input-embedding hook for `model.base_model.model.model.visual`: `get_input_embeddings` not auto‑handled for Qwen3_5VisionModel; please override in the subclass.. Falling back to pre-forward hook.
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 248046}.
+==((====))==  Unsloth - 2x faster free finetuning | Num GPUs used = 1
+   \\   /|    Num examples = 80,000 | Num Epochs = 10 | Total steps = 12,500
+O^O/ \_/ \    Batch size per device = 16 | Gradient accumulation steps = 4
+\        /    Data Parallel GPUs = 1 | Total batch size (16 x 4 x 1) = 64
+ "-____-"     Trainable parameters = 13,181,952 of 866,167,872 (1.52% trained)
+Unsloth: Model does not have a default image size - using 512
+[train] Starting training …
+  0%|          | 0/12500 [00:00<?, ?it/s]
