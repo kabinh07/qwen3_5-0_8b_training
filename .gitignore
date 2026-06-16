@@ -1,3 +1,4 @@
 .env
 outputs/*
 unsloth_compiled_cache
+*.log
