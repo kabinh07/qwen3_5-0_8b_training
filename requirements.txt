@@ -33,3 +33,4 @@ jiwer
 
 # ── numerics (unsloth builds expect numpy<2) ────────────────────────────────────
 numpy
+python-dotenv

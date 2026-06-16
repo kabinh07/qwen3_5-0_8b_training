@@ -1,6 +1,6 @@
 """
-2026.6.1
-2026.6.1
+2026.6.5
+2026.6.7
 5.5.0
 0.24.0
 __UNSLOTH_VERSIONING__
@@ -163,7 +163,7 @@ def chunked_selective_log_softmax(
     chunked_logits = torch.chunk(logits.reshape(-1, logits.shape[-1]), chunks = chunks, dim = 0)
     chunked_index  = torch.chunk(index.reshape(-1), chunks = chunks, dim = 0)
     all_per_token_logps = []
-    # Below loop does the same as selective_log_softmax(chunk_logits, chunk_index)
+    # Per-chunk selective_log_softmax.
     for chunk_logits, chunk_index in zip(chunked_logits, chunked_index):
         chunk_logits = chunk_logits.to(torch.float32)
         if temperature != 1.0:
@@ -182,9 +182,7 @@ def calculate_pad_tokens_in_prompt(
     logits_to_keep: int,
     pad_token_id: int
 ) -> torch.Tensor:
-    """
-    Given prompt tensor, it returns all the left padded tokens in that sequence. so [pad, pad, pad, cat] = 3 tokens
-    """
+    """Count left-padded tokens per sequence, e.g. [pad, pad, pad, cat] -> 3."""
     if logits_to_keep >= input_ids.shape[1]:
         raise ValueError("logits_to_keep must be smaller than the sequence length.")
 
@@ -202,12 +200,10 @@ def create_completion_attention_mask(
     max_left_pad: int,
     pad_token_id: int
 ) -> torch.Tensor:
-    """
-    Given that we have a sequence, [p,p,p,c,c,c,pad,pad,pad]
+    """Build a completion mask that zeros leading prompt and trailing pad tokens.
 
-    Where p are extra prompt tokens we got from slicing the torch tensor, c is completion tokens
-    and pad are pad tokens, this function would make a completion mask that would 0 out the pad
-    and p tokens. so in this example [0,0,0,1,1,1,0,0,0]
+    For [p,p,p,c,c,c,pad,pad,pad] (p=sliced prompt, c=completion, pad=padding)
+    this returns [0,0,0,1,1,1,0,0,0].
     """
     batch_size, completion_len = completion_input_ids.shape
     device = completion_input_ids.device
@@ -224,11 +220,9 @@ def create_completion_attention_mask(
     return final_mask
 
 def left_pack_padding(tensor: torch.Tensor, pad_id: int) -> torch.Tensor:
-    """
-    Moves all padding tokens in each sequence of a batch to the right.
-    """
+    """Move all padding tokens in each sequence to the right."""
     mask = (tensor != pad_id)
-    # Must do stable=True since binary mark is unordered
+    # stable=True since the binary mask is unordered.
     sorted_indices = torch.argsort(mask, dim=1, descending=True, stable=True)
     packed_tensor = torch.gather(tensor, 1, sorted_indices)
     return packed_tensor
@@ -238,9 +232,7 @@ def align_logprobs_with_mask(
     attention_mask: torch.Tensor,
     pad_value: float = 0.0
 ) -> torch.Tensor:
-    """
-    Aligns a log probability tensor with a given attention mask.
-    """
+    """Align a log probability tensor with a given attention mask."""
 
     device = logprob_tensor.device
     batch_size, logprob_seq_len = logprob_tensor.shape
@@ -258,24 +250,14 @@ def align_logprobs_with_mask(
     cols = torch.arange(logprob_seq_len, device=device)
     dest_indices = left_pad_counts.unsqueeze(1) + cols
 
-    # Create destination row indices
-    # Shape: [batch_size, logprob_seq_len]
+    # Destination row indices, shape [batch_size, logprob_seq_len].
     row_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand_as(dest_indices)
 
-    # --- 4. Filter out-of-bounds indices and perform assignment ---
-    # Create a mask to identify only the indices that are within the bounds
-    # of the target tensor's sequence length.
+    # Keep only in-bounds destinations, then scatter via advanced indexing.
     valid_mask = dest_indices < mask_seq_len
-
-    # Use this mask to select only the valid row indices, column indices,
-    # and the corresponding values from the logprob tensor.
-    # This flattens the selected elements into 1D tensors.
     valid_rows = row_indices[valid_mask]
     valid_cols = dest_indices[valid_mask]
     valid_vals = logprob_tensor[valid_mask]
-
-    # Place the valid values into their correct positions in the padded tensor
-    # using a single, efficient advanced indexing operation.
     padded_logprobs[valid_rows, valid_cols] = valid_vals
 
     return padded_logprobs
@@ -284,9 +266,7 @@ def align_completion_tool_mask(
     tool_mask: torch.Tensor,
     completion_mask: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Aligns a raw completion-length tool/env mask with Unsloth's repacked loss mask.
-    """
+    """Align a raw completion-length tool/env mask with Unsloth's repacked loss mask."""
     if tool_mask is None:
         return completion_mask
     if tool_mask.shape[0] != completion_mask.shape[0]:
@@ -320,13 +300,13 @@ def autotune_batch_and_chunks(
         free_bytes, _ = torch.cuda.mem_get_info()
         limit_gb = (free_bytes / (1024**3))*.80
     elif hasattr(torch, "xpu") and torch.xpu.is_available():
-        # For XPU: estimate free memory from total - reserved
+        # XPU: estimate free memory as total - reserved.
         total_mem = torch.xpu.get_device_properties(0).total_memory
         reserved_mem = torch.xpu.memory_reserved()
         free_bytes = total_mem - reserved_mem
         limit_gb = (free_bytes / (1024**3)) * 0.80
     else:
-        # Fallback: assume 8GB available
+        # Fallback: assume 8GB available.
         limit_gb = 8.0
 
     bytes_to_gb = 1024**3

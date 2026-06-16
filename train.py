@@ -50,7 +50,7 @@ DATA_DIR          = Path(env("DATA_DIR", "/workspace/data"))
 OUTPUT_DIR        = Path(env("OUTPUT_DIR", "/workspace/outputs"))
 MODEL_SAVE_DIR    = Path(env("MODEL_SAVE_DIR", "/workspace/outputs/qwen_lora"))
 
-BASE_MODEL        = env("BASE_MODEL", "unsloth/Qwen3.5-0.8B")
+BASE_MODEL        = env("BASE_MODEL", "kavinh07/unsloth_finetune_qwen3.5-0.8B")
 LOAD_IN_4BIT      = env_bool("LOAD_IN_4BIT", "false")
 
 LORA_R            = env_int("LORA_R", 16)
@@ -79,7 +79,7 @@ SAVE_GGUF_Q8      = env_bool("SAVE_GGUF_Q8", "true")
 SAVE_GGUF_Q4      = env_bool("SAVE_GGUF_Q4_K_M", "true")
 
 PUSH_TO_HUB       = env_bool("PUSH_TO_HUB", "false")
-HF_REPO_ID        = env("HF_REPO_ID", "kavinh07/unsloth_finetune_qwen3.5-0.8B")
+HF_REPO_ID        = env("HF_REPO_ID", "kavinh07/unsloth_finetune_qwen3.5-0.8B_p2")
 
 OCR_PROMPT        = env("OCR_PROMPT", "All text in this image is in {LANG}. Transcribe every character exactly as it appears. Output only the text.")
 
@@ -177,6 +177,12 @@ def load_model_and_tokenizer(for_inference: bool = False):
     )
 
     if not for_inference:
+        # If the loaded repo already contains LoRA adapters (e.g. a prior fine-tune),
+        # merge them into the base weights before attaching fresh adapters.
+        if hasattr(model, 'peft_config'):
+            print("[model] Existing LoRA adapters detected — merging into base weights …")
+            model = model.merge_and_unload()
+
         model = FastVisionModel.get_peft_model(
             model,
             finetune_vision_layers=env_bool("FINETUNE_VISION_LAYERS", "true"),
@@ -196,7 +202,7 @@ def load_model_and_tokenizer(for_inference: bool = False):
     return model, tokenizer
 
 
-def run_inference(model, tokenizer, image, instruction: str = None):
+def run_inference(model, tokenizer, image, instruction: str = None, stream: bool = True):
     """Run inference on a single image (PIL Image or path string)."""
     from unsloth import FastVisionModel
     from transformers import TextStreamer
@@ -220,10 +226,9 @@ def run_inference(model, tokenizer, image, instruction: str = None):
         return_tensors="pt",
     ).to("cuda")
 
-    text_streamer = TextStreamer(tokenizer, skip_prompt=True)
     out_ids = model.generate(
         **inputs,
-        streamer=text_streamer,
+        streamer=TextStreamer(tokenizer, skip_prompt=True) if stream else None,
         max_new_tokens=512,
         use_cache=True,
         temperature=1.5,
@@ -372,10 +377,17 @@ def mode_eval():
 
 
 def mode_infer():
-    """Single-image inference — pass IMAGE_PATH env var."""
-    image_path = os.environ.get("IMAGE_PATH")
-    if not image_path:
-        print("Set IMAGE_PATH env var to the image you want to run inference on.")
+    """Batch inference over all images in INFER_IMAGE_DIR, printed as a mapping."""
+    _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+
+    infer_dir = Path(os.environ.get("INFER_IMAGE_DIR", ""))
+    if not infer_dir or not infer_dir.is_dir():
+        print(f"Set INFER_IMAGE_DIR to a directory containing images (got: '{infer_dir}').")
+        sys.exit(1)
+
+    images = sorted(p for p in infer_dir.iterdir() if p.suffix.lower() in _IMAGE_EXTS)
+    if not images:
+        print(f"No images found in {infer_dir}")
         sys.exit(1)
 
     model_path = os.environ.get("INFER_MODEL_PATH", str(MODEL_SAVE_DIR))
@@ -385,8 +397,20 @@ def mode_infer():
         model_name=model_path,
         load_in_4bit=LOAD_IN_4BIT,
     )
-    result = run_inference(model, tokenizer, image_path)
-    print(result)
+
+    results = {}
+    for img_path in images:
+        print(f"[infer] Processing {img_path.name} …")
+        results[img_path.name] = run_inference(model, tokenizer, str(img_path), stream=False)
+
+    col = max(len(n) for n in results) + 2
+    sep = "─" * (col + 3 + 80)
+    print(f"\n{sep}")
+    print(f"{'Image':<{col}}│  Prediction")
+    print(sep)
+    for name, text in results.items():
+        print(f"{name:<{col}}│  {text}")
+    print(sep)
 
 
 def mode_export(model=None, tokenizer=None):
