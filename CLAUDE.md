@@ -33,6 +33,8 @@ All config lives in `.env` (gitignored). `HF_TOKEN` is the only required var wit
 | `PER_DEVICE_BATCH_SIZE` | `16` | Lower if OOM |
 | `GRADIENT_ACCUMULATION_STEPS` | `4` | Effective batch = batch × accum |
 | `SAVE_MERGED_16BIT` / `SAVE_GGUF_Q8` / `SAVE_GGUF_Q4_K_M` | `true` | Export steps after training |
+| `LOCAL_HARD_NEG_DIR` | — | Path to folder of `<stem>.png` + `<stem>.txt` pairs injected as hard negatives (oversampled `CONFUSION_OVERSAMPLE×`). Use to fix specific recurring errors. |
+| `CONFUSION_OVERSAMPLE` | `4` | How many times hard/conjunct rows (and local hard negatives) are repeated |
 
 ## Architecture
 
