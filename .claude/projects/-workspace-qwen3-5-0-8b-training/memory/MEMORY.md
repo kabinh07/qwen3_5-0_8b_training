@@ -1,0 +1,1 @@
+- [Eval CER metric broken](eval-cer-metric-broken.md) — train.py eval CER is inflated & causes premature early-stop; fix before retraining

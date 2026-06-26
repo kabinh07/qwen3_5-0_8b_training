@@ -375,11 +375,32 @@ def make_compute_metrics(tokenizer):
         import jiwer
 
         pred_ids, labels = eval_pred
-        labels   = np.where(labels   != -100, labels,   tokenizer.pad_token_id)
-        pred_ids = np.where(pred_ids != -100, pred_ids, tokenizer.pad_token_id)
+        pred_ids = np.asarray(pred_ids)
+        labels   = np.asarray(labels)
 
-        pred_strs  = [nfc(s) for s in tokenizer.batch_decode(pred_ids, skip_special_tokens=True)]
-        label_strs = [nfc(s) for s in tokenizer.batch_decode(labels,   skip_special_tokens=True)]
+        # Teacher-forced logits at position i predict token i+1, so shift the
+        # argmax predictions left by one to align them with the labels, then keep
+        # ONLY the target positions (labels != -100). Without this the decoded
+        # prediction spans the whole prompt + image region while the label is the
+        # answer only — producing CER > 1.0 that does not reflect real accuracy
+        # and wrongly trips early stopping (the previous run stopped at epoch ~1).
+        pred_ids = pred_ids[:, :-1]
+        labels   = labels[:, 1:]
+        mask     = labels != -100
+
+        pred_strs, label_strs = [], []
+        for p_row, l_row, m_row in zip(pred_ids, labels, mask):
+            if not m_row.any():
+                continue
+            label_strs.append(nfc(tokenizer.decode(l_row[m_row], skip_special_tokens=True)))
+            pred_strs.append( nfc(tokenizer.decode(p_row[m_row], skip_special_tokens=True)))
+
+        # Drop pairs with an empty reference (jiwer.cer divides by ref length).
+        pairs = [(r, h) for r, h in zip(label_strs, pred_strs) if r.strip()]
+        if not pairs:
+            return {"cer": 1.0, "cer_bn": 1.0, "cer_en": 1.0}
+        label_strs = [r for r, _ in pairs]
+        pred_strs  = [h for _, h in pairs]
 
         overall_cer = jiwer.cer(label_strs, pred_strs)
 
@@ -620,6 +641,31 @@ def mode_eval():
     print(f"\n[eval] Final CER on {n} samples: {overall_cer:.4f}")
 
 
+# Per-image language hint for batch inference. The test set mixes Bangla and
+# English images, and the prompt's {LANG} slot materially affects decoding, so
+# each file is mapped to its true language. Files not listed fall back to
+# INFER_DEFAULT_LANG below ("Both Bangla and English").
+INFER_LANG_MAP = {
+    # English — dates / NID digit strings
+    "2026-04-26_194956.png": "English",
+    "2026-04-26_195000.png": "English",
+    "2026-06-10_193616.png": "English",
+    "2026-06-10_193625.png": "English",
+    # Bangla — names / addresses
+    "2026-04-22_132012.png": "Bangla",
+    "2026-04-22_133236.png": "Bangla",
+    "2026-04-26_194947.png": "Bangla",
+    "2026-06-10_194927.png": "Bangla",
+    "2026-06-10_195402.png": "Bangla",
+    "2026-06-17.png": "Bangla",
+    "2026-06-17_21-28-21.png": "Bangla",
+    "2026-06-17_21-29-17.png": "Bangla",
+    "2026-06-17_21-39-32.png": "Bangla",
+    "Screenshot 2026-06-17 at 21-03-39 খালেদা জিয়া - উইকিপিডিয়া.png": "Bangla",
+}
+INFER_DEFAULT_LANG = "Both Bangla and English"
+
+
 def mode_infer():
     """Batch inference over all images in INFER_IMAGE_DIR."""
     _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
@@ -645,9 +691,11 @@ def mode_infer():
 
     results = {}
     for img_path in images:
-        print(f"[infer] Processing {img_path.name} …")
+        lang        = INFER_LANG_MAP.get(img_path.name, INFER_DEFAULT_LANG)
+        instruction = OCR_PROMPT.replace("{LANG}", lang)
+        print(f"[infer] Processing {img_path.name} … (lang={lang})")
         results[img_path.name] = run_inference(
-            model, tokenizer, str(img_path), stream=False
+            model, tokenizer, str(img_path), instruction=instruction, stream=False
         )
 
     col = max(len(n) for n in results) + 2

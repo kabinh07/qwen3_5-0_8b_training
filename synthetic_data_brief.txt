@@ -1,0 +1,125 @@
+Synthetic OCR Training Data — Hard Negative Generation Brief
+=============================================================
+
+Background
+----------
+This is for a Bangla + English OCR model (Qwen3.5-0.8B fine-tune). The model
+currently fails on four specific patterns. Generate targeted examples for each
+category below.
+
+
+Category 1: Consecutive repeated digits (class_name: confusion_training)
+-------------------------------------------------------------------------
+Problem: Model hallucinates an extra digit when it sees 3-5 identical
+consecutive digits.
+
+Generate text strings containing:
+- Exactly 3, 4, and 5 consecutive zeros: 000, 0000, 00000
+- Same for other repeated digits: 111, 1111, 9999, 8888
+- In realistic contexts: NID numbers, phone numbers, account numbers, timestamps
+
+Example strings to use as labels:
+  19944824509000020
+  01700000123
+  199448245090000
+  0190000456789
+  NID: 19881234500003
+  AC: 10000020
+  01911000034
+  1234000056
+
+Visual style: Red or dark ink on white/cream paper. Single line. Monospace or
+semi-monospace font. Image width 400-600px, height 40-60px.
+
+
+Category 2: গ vs প confusion (class_name: confusion_training)
+--------------------------------------------------------------
+Problem: Model swaps গ (ga) and প (pa) — they share similar closed-top glyph
+structure in many print fonts.
+
+Generate text with both characters appearing in the same or adjacent words,
+especially:
+- গ and প close together in a line
+- Words starting with গ near words starting with প
+- Names and place names using both
+
+Example label strings:
+  পলাশ গ্রাম
+  গোপালগঞ্জ পল্লী
+  পাগলা গেট
+  গ্রাম: পাঁচগাছি
+  প্রতাপগঞ্জ গ্রাম
+  গোপাল পাড়া
+  পারগাও গ্রাম
+  গাজীপুর পৌরসভা
+  পলাশবাড়ী গ্রাম
+
+Visual style: Black ink on white/off-white. Address-line style, single line.
+Regular Bangla serif or sans-serif font (SolaimanLipi, Kalpurush, Nikosh).
+
+
+Category 3: ড vs দ confusion (class_name: confusion_training)
+--------------------------------------------------------------
+Problem: Model substitutes দ (da, dental) for ড (Da, retroflex) in conjunct
+forms. The hook/curl at the bottom of ড is visually faint in small or degraded
+print.
+
+Focus on:
+- ড in conjunct forms: ন্ড, ন্ডা, ড়
+- Real Dhaka place names that contain ড
+
+Example label strings:
+  গেন্ডারিয়া
+  মান্ডা
+  বান্ডেল রোড
+  ইন্দিরা রোড ভান্ডার
+  ডাকঘর: গেন্ডারিয়া
+  রাস্তা: গেন্ডারিয়া মেইন রোড
+  মান্ডা, খিলগাঁও
+  গ্রাম: চান্দগাঁও, ডাকঘর: চান্দগাঁও
+  বান্ডেল ঘাট রোড, কেরানীগঞ্জ
+  মুন্ডা পাড়া
+  গান্ডারিয়া ডাকঘর, ঢাকা
+  মান্ডা থানা, ঢাকা
+
+Visual style: Black ink on white/off-white. Address-line style. Small to medium
+font size (12-16pt equivalent). Include full address line format:
+  ঠিকানা: বাসা/হোল্ডিং: ৩৪, গ্রাম/রাস্তা: শরাফৎগঞ্জ লেন, গেন্ডারিয়া, ডাকঘর: ...
+
+
+Category 4: Low-ink / faded images (class_name: confusion_training)
+---------------------------------------------------------------------
+Problem: Model fails on images where ink is light, uneven, or faded — common
+in stamp-pad printed voter ID cards and NID documents.
+
+Apply these degradations to ALL other categories above, and also to normal
+address/name text:
+
+  Ink fade         : Text opacity 30-60% of full black
+  Uneven ink       : Per-character random opacity variation ±20%
+  Background noise : Gaussian noise σ=5-15 on cream/off-white background
+  Slight blur      : Gaussian blur radius 0.3-0.8px
+  Paper texture    : Light fibrous texture overlay, opacity 10-20%
+  Ink bleed        : Very slight dilation of dark pixels (1px)
+  Color shift      : Text color #1a1a1a to #555555 instead of pure black
+                     For red stamps: #c0392b to #e8a0a0
+  JPEG compression : Quality 60-80 after rendering
+
+For the red-ink stamp style (dates, NID numbers): render in rgb(180,30,30)
+at 40-70% opacity on white.
+
+
+Recommended volumes per category
+---------------------------------
+  Consecutive repeated digits         : 500-1000 images
+  গ vs প confusion                    : 300-500 images
+  ড vs দ confusion                    : 300-500 images
+  Low-ink variants of the above       : 1x of each (double everything above
+                                        with fading applied)
+
+
+Label format
+------------
+Each image gets a plain .txt file with exactly the transcribed text,
+NFC-normalized, no extra whitespace. Set class_name = confusion_training on
+all these rows so the pipeline oversamples them 4x automatically.
