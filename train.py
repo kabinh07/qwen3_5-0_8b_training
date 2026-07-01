@@ -244,29 +244,49 @@ class OCRDatasetPreparator:
         print(f"[data] Loading {self.dataset_id} …")
         ds = hf_load(self.dataset_id, token=self.token)
 
+        train_raw = ds["train"]
+
         # ── oversample confusion_training (conjunct-heavy) rows ───────────
-        train_raw  = ds["train"]
-        easy       = train_raw.filter(
-            lambda x: x["class_name"] != "confusion_training",
-            num_proc=DATASET_NUM_PROC,
-        )
-        hard       = train_raw.filter(
-            lambda x: x["class_name"] == "confusion_training",
-            num_proc=DATASET_NUM_PROC,
-        )
-        print(
-            f"[data] Raw split — easy: {len(easy)}, "
-            f"hard (conjunct): {len(hard)}  →  repeating hard {self.confusion_oversample}×"
-        )
-        hard_nx    = concatenate_datasets([hard] * self.confusion_oversample)
-        balanced   = concatenate_datasets([easy, hard_nx]).shuffle(seed=SEED)
+        # Skip the easy/hard split when the dataset has no class_name column
+        # (e.g. a pure-conjunct dataset where every row is already hard).
+        if "class_name" in train_raw.column_names:
+            easy = train_raw.filter(
+                lambda x: x["class_name"] != "confusion_training",
+                num_proc=DATASET_NUM_PROC,
+            )
+            hard = train_raw.filter(
+                lambda x: x["class_name"] == "confusion_training",
+                num_proc=DATASET_NUM_PROC,
+            )
+            print(
+                f"[data] Raw split — easy: {len(easy)}, "
+                f"hard (conjunct): {len(hard)}  →  repeating hard {self.confusion_oversample}×"
+            )
+            hard_nx  = concatenate_datasets([hard] * self.confusion_oversample)
+            balanced = concatenate_datasets([easy, hard_nx]).shuffle(seed=SEED)
+        else:
+            print(
+                f"[data] No class_name column — using all {len(train_raw)} rows "
+                f"(pure-conjunct dataset, oversample=1)"
+            )
+            balanced = train_raw.shuffle(seed=SEED)
 
-        train_split = self._select(balanced,         self.train_samples)
-        val_split   = self._select(ds["validation"], self.val_samples)
+        train_split = self._select(balanced, self.train_samples)
 
-        print(f"[data] Converting {len(train_split)} train + {len(val_split)} val records …")
+        # ── validation split (optional — some datasets ship train-only) ───
+        if "validation" in ds:
+            val_split = self._select(ds["validation"], self.val_samples)
+            print(f"[data] Converting {len(train_split)} train + {len(val_split)} val records …")
+            val_data = [self._to_chat(r) for r in val_split]
+        else:
+            print(
+                f"[data] No validation split in dataset — "
+                f"eval/early-stopping disabled for this run"
+            )
+            val_data = []
+
+        print(f"[data] Converting {len(train_split)} train records …")
         train_data = [self._to_chat(r) for r in train_split]
-        val_data   = [self._to_chat(r) for r in val_split]
 
         # ── inject local hard negatives (oversampled) ─────────────────────
         local_hard = self._load_local_hard_negatives()

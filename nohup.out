@@ -1,0 +1,21 @@
+Traceback (most recent call last):
+  File "/workspace/qwen3_5-0_8b_training/train.py", line 24, in <module>
+    import unsloth  # must be first to apply all optimizations before transformers/peft load
+    ^^^^^^^^^^^^^^
+  File "/workspace/qwen3_5-0_8b_training/.venv/lib/python3.11/site-packages/unsloth/__init__.py", line 153, in <module>
+    from ._gpu_init import *
+  File "/workspace/qwen3_5-0_8b_training/.venv/lib/python3.11/site-packages/unsloth/_gpu_init.py", line 18, in <module>
+    import numpy as np
+  File "/workspace/qwen3_5-0_8b_training/.venv/lib/python3.11/site-packages/numpy/__init__.py", line 454, in <module>
+    from . import lib
+  File "/workspace/qwen3_5-0_8b_training/.venv/lib/python3.11/site-packages/numpy/lib/__init__.py", line 18, in <module>
+    from . import (
+  File "/workspace/qwen3_5-0_8b_training/.venv/lib/python3.11/site-packages/numpy/lib/_polynomial_impl.py", line 29, in <module>
+    from numpy.lib._type_check_impl import imag, iscomplex, mintypecode, real
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 936, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1032, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1131, in get_data
+KeyboardInterrupt
